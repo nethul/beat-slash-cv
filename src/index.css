@@ -1,0 +1,75 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Rajdhani', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background-color: #050508;
+    color: #ffffff;
+  }
+  
+  h1, h2, h3, .font-cyber {
+    font-family: 'Orbitron', -apple-system, sans-serif;
+  }
+}
+
+/* Immersive UI Neon Glow & Saber Animations */
+@keyframes neon-pulse-pink {
+  0%, 100% { 
+    box-shadow: 0 0 20px rgba(236, 72, 153, 0.6), inset 0 0 15px rgba(236, 72, 153, 0.4); 
+  }
+  50% { 
+    box-shadow: 0 0 35px rgba(236, 72, 153, 0.9), inset 0 0 25px rgba(236, 72, 153, 0.7); 
+  }
+}
+
+@keyframes neon-pulse-cyan {
+  0%, 100% { 
+    box-shadow: 0 0 20px rgba(34, 211, 238, 0.6), inset 0 0 15px rgba(34, 211, 238, 0.4); 
+  }
+  50% { 
+    box-shadow: 0 0 35px rgba(34, 211, 238, 0.9), inset 0 0 25px rgba(34, 211, 238, 0.7); 
+  }
+}
+
+.glow-pink {
+  animation: neon-pulse-pink 2s infinite ease-in-out;
+}
+
+.glow-cyan {
+  animation: neon-pulse-cyan 2s infinite ease-in-out;
+}
+
+.text-glow-pink {
+  text-shadow: 0 0 10px rgba(236, 72, 153, 0.8), 0 0 25px rgba(236, 72, 153, 0.5);
+}
+
+.text-glow-cyan {
+  text-shadow: 0 0 10px rgba(34, 211, 238, 0.8), 0 0 25px rgba(34, 211, 238, 0.5);
+}
+
+.text-glow-white {
+  text-shadow: 0 0 10px rgba(255, 255, 255, 0.9), 0 0 20px rgba(255, 255, 255, 0.6);
+}
+
+/* Perspective Grid Background */
+.bg-perspective-grid {
+  background-image: linear-gradient(#4f46e5 1px, transparent 1px), linear-gradient(90deg, #4f46e5 1px, transparent 1px);
+  background-size: 80px 80px;
+  transform: perspective(500px) rotateX(60deg) translateY(-100px);
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(5, 5, 8, 0.9);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(34, 211, 238, 0.4);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(34, 211, 238, 0.8);
+}

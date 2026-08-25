@@ -1,0 +1,10 @@
+{
+  "name": "Beat Slash - Vision Rhythm Game",
+  "description": "A dynamic rhythm slicing game inspired by Beat Saber, using your webcam and AI hand tracking to slice flying neon blocks with virtual sabers to energetic electronic beats.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
