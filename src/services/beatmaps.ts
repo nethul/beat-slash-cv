@@ -49,6 +49,24 @@ function generateTrackNotes(bpm: number, duration: number, difficulty: Difficult
     const bar = Math.floor(beat / 4);
     const beatInBar = beat % 4;
 
+    // Introduce Obstacle Dodge Barriers periodically (every 16 beats)
+    const isObstacleWall = (beat % 16 === 8);
+    if (isObstacleWall) {
+      const isLeftWall = (Math.floor(beat / 16) % 2 === 0);
+      notes.push({
+        id: `wall-${noteCounter++}`,
+        time: Math.round(time * 1000) / 1000,
+        lane: isLeftWall ? 0 : 2,
+        layer: 0,
+        type: 'obstacle',
+        color: 'bomb',
+        direction: 'any',
+        obstacleWidth: 2,
+        obstacleHeight: 3,
+      });
+      continue;
+    }
+
     // Introduce bomb obstacles periodically in hard/expert
     const isBombOpportunity = (difficulty === 'hard' || difficulty === 'expert') && beat % 8 === 6 && Math.random() < 0.35;
 
@@ -115,6 +133,54 @@ function generateTrackNotes(bpm: number, duration: number, difficulty: Difficult
 
 export const PRESET_SONGS: SongTrack[] = [
   {
+    id: 'shape-of-you',
+    title: 'Shape of You',
+    artist: 'Ed Sheeran',
+    genre: 'Tropical Pop / Dance',
+    bpm: 96,
+    difficulty: 'medium',
+    duration: 65,
+    coverColor: '#f59e0b',
+    notes: generateTrackNotes(96, 65, 'medium'),
+    description: 'Iconic 96 BPM tropical marimba groove with rhythmic saber flows and bounce cuts.',
+  },
+  {
+    id: 'faded',
+    title: 'Faded',
+    artist: 'Alan Walker',
+    genre: 'EDM / Electro Ballad',
+    bpm: 90,
+    difficulty: 'medium',
+    duration: 70,
+    coverColor: '#3b82f6',
+    notes: generateTrackNotes(90, 70, 'medium'),
+    description: 'Haunting 90 BPM F# minor electro ballad with sub-bass drops and precise timing.',
+  },
+  {
+    id: 'believer',
+    title: 'Believer',
+    artist: 'Imagine Dragons',
+    genre: 'Rock / Synth Anthem',
+    bpm: 125,
+    difficulty: 'hard',
+    duration: 60,
+    coverColor: '#ef4444',
+    notes: generateTrackNotes(125, 60, 'hard'),
+    description: 'Pounding 125 BPM march beat featuring intense double cuts and dodge barriers.',
+  },
+  {
+    id: 'blinding-lights',
+    title: 'Blinding Lights',
+    artist: 'The Weeknd',
+    genre: 'Synthwave / Retro Pop',
+    bpm: 171,
+    difficulty: 'expert',
+    duration: 60,
+    coverColor: '#ec4899',
+    notes: generateTrackNotes(171, 60, 'expert'),
+    description: 'Ultra fast 171 BPM retro synthwave stream with high-speed cuts and rapid dodge walls.',
+  },
+  {
     id: 'neon-overdrive',
     title: 'Neon Overdrive',
     artist: 'Cyber Syndicate',
@@ -122,45 +188,9 @@ export const PRESET_SONGS: SongTrack[] = [
     bpm: 128,
     difficulty: 'medium',
     duration: 65,
-    coverColor: '#ef4444',
-    notes: generateTrackNotes(128, 65, 'medium'),
-    description: 'Pulsing 128 BPM electro bass with balanced dual saber flows and neon drops.',
-  },
-  {
-    id: 'hyper-velocity',
-    title: 'Hyper Velocity',
-    artist: 'SynthWave 2088',
-    genre: 'High Energy Synthwave',
-    bpm: 140,
-    difficulty: 'hard',
-    duration: 60,
     coverColor: '#06b6d4',
-    notes: generateTrackNotes(140, 60, 'hard'),
-    description: 'Blazing 140 BPM rolling synthwave with rapid diagonal cuts and double strikes.',
-  },
-  {
-    id: 'cyber-pulse',
-    title: 'Cyber Pulse',
-    artist: 'Neo Tokyo Beats',
-    genre: 'Melodic Chillwave',
-    bpm: 110,
-    difficulty: 'easy',
-    duration: 60,
-    coverColor: '#10b981',
-    notes: generateTrackNotes(110, 60, 'easy'),
-    description: 'Smooth 110 BPM melodic groove, perfect for mastering hand gestures and slicing rhythm.',
-  },
-  {
-    id: 'quantum-chaos',
-    title: 'Quantum Chaos',
-    artist: 'Subatomic Pulse',
-    genre: 'Drum & Bass',
-    bpm: 160,
-    difficulty: 'expert',
-    duration: 55,
-    coverColor: '#a855f7',
-    notes: generateTrackNotes(160, 55, 'expert'),
-    description: 'Insane 160 BPM breakbeats featuring fast double-slashes and tricky obstacle mines.',
+    notes: generateTrackNotes(128, 65, 'medium'),
+    description: 'Driving 128 BPM electro bass with balanced dual saber flows and neon drops.',
   },
 ];
 
@@ -338,6 +368,32 @@ export function generateEndlessNotesChunk(
     const time = beat * beatInterval;
     const bar = Math.floor(beat / 4);
     const beatInBar = beat % 4;
+
+    // Periodic 3D Obstacle Dodge Barrier placement (every 16 beats)
+    // Spawns holographic hazard walls forcing player to physically lean left or right to avoid bumping!
+    const isObstacleWall = (Math.floor(beat) % 16 === 8) && (beat - Math.floor(beat) < stepRate / 2);
+    if (isObstacleWall) {
+      const isLeftWall = (Math.floor(beat / 16) % 2 === 0);
+      let wallLane = isLeftWall ? 0 : 2;
+      if (focus === 'left') {
+        wallLane = 0; // Wall on left side: player must dodge/lean right!
+      } else if (focus === 'right') {
+        wallLane = 2; // Wall on right side: player must dodge/lean left!
+      }
+
+      notes.push({
+        id: `train-wall-${counter++}`,
+        time: Math.round(time * 1000) / 1000,
+        lane: wallLane,
+        layer: 0,
+        type: 'obstacle',
+        color: 'bomb',
+        direction: 'any',
+        obstacleWidth: 2,
+        obstacleHeight: 3,
+      });
+      continue;
+    }
 
     // Periodic bomb placement
     if (bombChance > 0 && beat % 8 === 6 && Math.random() < bombChance) {

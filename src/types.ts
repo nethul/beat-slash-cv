@@ -21,6 +21,8 @@ export interface Note {
   type: NoteType;
   color: BlockColor;
   direction: CutDirection;
+  obstacleWidth?: number; // 1, 2, or 4 lanes wide
+  obstacleHeight?: number; // 1, 2, or 3 layers high
   sliced?: boolean;
   missed?: boolean;
   sliceAccuracy?: number; // 0 - 100
@@ -74,6 +76,7 @@ export interface HandTrackingResult {
   fps: number;
   isReady: boolean;
   error?: string | null;
+  previewFrame?: string;
 }
 
 export type DifficultyLevel = 'easy' | 'medium' | 'hard' | 'expert';

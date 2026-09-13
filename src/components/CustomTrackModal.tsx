@@ -3,6 +3,7 @@ import { Upload, Music, Zap, X, FileAudio, Check, AlertCircle } from 'lucide-rea
 import { DifficultyLevel, SongTrack } from '../types';
 import { soundManager } from '../services/audioEngine';
 import { generateCustomBeatmap } from '../services/beatmaps';
+import { BeatDetector } from '../services/beatDetector';
 
 interface CustomTrackModalProps {
   onCustomSongLoaded: (song: SongTrack, audioBuffer: AudioBuffer) => void;
@@ -75,14 +76,26 @@ export const CustomTrackModal: React.FC<CustomTrackModalProps> = ({
 
     try {
       const audioBuffer = await soundManager.loadCustomAudioFile(file);
-      const duration = Math.min(audioBuffer.duration, 300); // Cap at 5 mins for map generation
+      const duration = Math.min(audioBuffer.duration, 300);
 
-      const customSong = generateCustomBeatmap(
+      // Perform spectral energy beat and onset analysis on the audio file
+      const detectedBeats = BeatDetector.analyzeAudioBuffer(audioBuffer);
+      const notes = detectedBeats.length > 5
+        ? BeatDetector.generateBeatmapFromDetectedBeats(detectedBeats, difficulty)
+        : generateCustomBeatmap(bpm, duration, difficulty, title).notes;
+
+      const customSong: SongTrack = {
+        id: `custom-${Date.now()}`,
+        title: title || 'My Custom Track',
+        artist: artist || 'Custom Upload',
+        genre: 'Custom Audio',
         bpm,
-        duration,
         difficulty,
-        title || 'My Custom Track'
-      );
+        duration,
+        coverColor: '#f59e0b',
+        notes,
+        description: `Auto-analyzed ${detectedBeats.length} energy beat onsets for precise musical synchronization.`,
+      };
 
       onCustomSongLoaded(customSong, audioBuffer);
     } catch (err: unknown) {

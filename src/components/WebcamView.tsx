@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Camera, CameraOff, CheckCircle2, AlertCircle, Eye, EyeOff } from 'lucide-react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { Camera, CameraOff, CheckCircle2, AlertCircle, Eye, EyeOff, Wifi, WifiOff, Zap } from 'lucide-react';
 import { HandTrackingResult, GameSettings } from '../types';
 import { handTracker } from '../services/handTracker';
 
@@ -27,30 +27,60 @@ export const WebcamView: React.FC<WebcamViewProps> = ({
   const [leftDetected, setLeftDetected] = useState<boolean>(false);
   const [rightDetected, setRightDetected] = useState<boolean>(false);
   const [isPipCollapsed, setIsPipCollapsed] = useState<boolean>(false);
+  const [isNativeMode, setIsNativeMode] = useState<boolean>(false);
+  const [serverInferenceMs, setServerInferenceMs] = useState<number>(0);
+  const [previewFrameSrc, setPreviewFrameSrc] = useState<string | null>(null);
 
-  // Initialize MediaPipe model and Camera stream
+  // Initialize hand tracker and camera
   useEffect(() => {
     let isMounted = true;
 
-    async function setupCameraAndTracker() {
+    async function setup() {
       setCameraState('loading');
       setErrorMessage(null);
 
-      // 1. Initialize MediaPipe WASM
+      // 1. Initialize hand tracker (tries native CUDA server first, falls back to WASM)
       const trackerReady = await handTracker.init();
       if (!isMounted) return;
 
+      const nativeConnected = handTracker.isNativeConnected();
+      setIsNativeMode(nativeConnected);
+
       if (!trackerReady) {
-        setErrorMessage('Could not load AI hand tracking model. Switching to pointer control.');
+        setErrorMessage('Could not load AI hand tracking. Switching to pointer control.');
         setCameraState('error');
       }
 
-      // 2. Request Camera Stream
+      // 2. If using native server, Python handles the camera directly
+      if (nativeConnected) {
+        console.log('[WebcamView] Native CUDA mode – Python handles camera');
+        setCameraState('active');
+        onVideoReady(null); // No browser video element needed
+
+        // Set up result callback from WebSocket
+        handTracker.onResult((result) => {
+          if (!isMounted) return;
+          onTrackingResult(result);
+          setTrackingFps(result.fps);
+          setLeftDetected(!!result.leftHand?.detected);
+          setRightDetected(!!result.rightHand?.detected);
+          if (result.previewFrame) {
+            setPreviewFrameSrc(result.previewFrame);
+          }
+
+          const diag = handTracker.getDiagnostics();
+          setServerInferenceMs(diag.serverInferenceMs);
+        });
+
+        return;
+      }
+
+      // 3. WASM fallback: need browser camera stream
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           video: {
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
+            width: { ideal: 640 },
+            height: { ideal: 480 },
             facingMode: 'user',
             frameRate: { ideal: 60, min: 30 },
           },
@@ -81,7 +111,7 @@ export const WebcamView: React.FC<WebcamViewProps> = ({
     }
 
     if (gameSettings.cameraActive) {
-      setupCameraAndTracker();
+      setup();
     } else {
       stopCamera();
     }
@@ -105,8 +135,9 @@ export const WebcamView: React.FC<WebcamViewProps> = ({
     onVideoReady(null);
   };
 
-  // Continuous Tracking Loop
+  // Continuous Tracking Loop (WASM fallback only – native mode uses WebSocket callbacks)
   useEffect(() => {
+    if (isNativeMode) return; // Native server pushes results via WebSocket
     let isLoopActive = true;
 
     const runTracking = () => {
@@ -122,7 +153,7 @@ export const WebcamView: React.FC<WebcamViewProps> = ({
           canvasW,
           canvasH,
           gameSettings.cameraMirror,
-          gameSettings.saberLength || 220
+          gameSettings.saberLength || 220,
         );
 
         onTrackingResult(result);
@@ -147,12 +178,12 @@ export const WebcamView: React.FC<WebcamViewProps> = ({
       isLoopActive = false;
       if (animationLoopRef.current) cancelAnimationFrame(animationLoopRef.current);
     };
-  }, [cameraState, gameSettings, onTrackingResult, isPipCollapsed]);
+  }, [cameraState, gameSettings, onTrackingResult, isPipCollapsed, isNativeMode]);
 
   const drawPipPreview = (
     canvas: HTMLCanvasElement,
     video: HTMLVideoElement,
-    result: HandTrackingResult
+    result: HandTrackingResult,
   ) => {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
@@ -180,7 +211,7 @@ export const WebcamView: React.FC<WebcamViewProps> = ({
     const drawHandMarker = (
       hand: HandTrackingResult['leftHand'],
       color: string,
-      label: string
+      label: string,
     ) => {
       if (!hand || !hand.detected) return;
 
@@ -219,14 +250,16 @@ export const WebcamView: React.FC<WebcamViewProps> = ({
 
   return (
     <>
-      {/* Hidden processing video element */}
-      <video
-        ref={videoRef}
-        playsInline
-        muted
-        autoPlay
-        className="hidden"
-      />
+      {/* Hidden processing video element (WASM fallback only) */}
+      {!isNativeMode && (
+        <video
+          ref={videoRef}
+          playsInline
+          muted
+          autoPlay
+          className="hidden"
+        />
+      )}
 
       {/* Picture-in-Picture Camera Feedback HUD */}
       {gameSettings.showCameraPreview && (
@@ -238,7 +271,11 @@ export const WebcamView: React.FC<WebcamViewProps> = ({
           <div className="flex items-center gap-2 px-3 py-1 bg-black/60 border border-white/20 rounded-lg backdrop-blur-md text-xs shadow-xl">
             <div className="flex items-center gap-1.5">
               {cameraState === 'active' ? (
-                <div className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse shadow-[0_0_8px_#22d3ee]" />
+                isNativeMode ? (
+                  <Zap className="w-3 h-3 text-green-400" />
+                ) : (
+                  <div className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse shadow-[0_0_8px_#22d3ee]" />
+                )
               ) : cameraState === 'loading' ? (
                 <div className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
               ) : (
@@ -246,12 +283,21 @@ export const WebcamView: React.FC<WebcamViewProps> = ({
               )}
               <span className="font-cyber font-bold text-[11px] tracking-wider text-slate-300">
                 {cameraState === 'active'
-                  ? `CAM ${trackingFps} FPS`
+                  ? isNativeMode
+                    ? `CUDA ${trackingFps} FPS`
+                    : `CAM ${trackingFps} FPS`
                   : cameraState === 'loading'
-                  ? 'AI MODEL LOADING...'
+                  ? 'CONNECTING...'
                   : 'CAMERA OFF'}
               </span>
             </div>
+
+            {/* Native mode latency badge */}
+            {isNativeMode && cameraState === 'active' && (
+              <span className="px-1.5 py-0.5 rounded text-[9px] font-black tracking-wider bg-green-500/20 text-green-400 border border-green-500/50">
+                {serverInferenceMs.toFixed(0)}ms
+              </span>
+            )}
 
             {/* Hand Status Badges */}
             {cameraState === 'active' && (
@@ -288,22 +334,50 @@ export const WebcamView: React.FC<WebcamViewProps> = ({
             </button>
           </div>
 
-          {/* PIP Canvas Feed */}
+          {/* PIP Canvas / Video Feed */}
           {!isPipCollapsed && (
             <div className="relative w-36 h-24 sm:w-44 sm:h-28 rounded-lg overflow-hidden border border-white/20 bg-black shadow-2xl shadow-indigo-950/60">
-              <canvas
-                ref={pipCanvasRef}
-                width={240}
-                height={160}
-                className="w-full h-full object-cover opacity-90"
-              />
-              <div className="absolute inset-0 bg-cyan-400/5 pointer-events-none" />
-              <div className="absolute top-2 right-2 w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse pointer-events-none" />
+              {isNativeMode ? (
+                previewFrameSrc ? (
+                  <div className="relative w-full h-full">
+                    <img
+                      src={previewFrameSrc}
+                      alt="Camera Preview"
+                      className="w-full h-full object-cover opacity-95 scale-x-[-1]"
+                    />
+                    <div className="absolute top-2 right-2 w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse pointer-events-none" />
+                    <div className="absolute bottom-1 left-1.5 px-1.5 py-0.5 bg-black/70 backdrop-blur rounded text-[8px] font-mono text-green-400 border border-green-500/30">
+                      LIVE CUDA
+                    </div>
+                  </div>
+                ) : (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-b from-green-950/80 to-black/90 text-center p-2">
+                    <Zap className="w-6 h-6 text-green-400 mb-1 animate-pulse" />
+                    <p className="text-[10px] font-cyber text-green-400 tracking-wider">NATIVE CUDA</p>
+                    <p className="text-[8px] text-green-300/60 mt-0.5">
+                      {serverInferenceMs > 0 ? `${serverInferenceMs.toFixed(1)}ms inference` : 'Initializing...'}
+                    </p>
+                  </div>
+                )
+              ) : (
+                <>
+                  <canvas
+                    ref={pipCanvasRef}
+                    width={240}
+                    height={160}
+                    className="w-full h-full object-cover opacity-90"
+                  />
+                  <div className="absolute inset-0 bg-cyan-400/5 pointer-events-none" />
+                  <div className="absolute top-2 right-2 w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse pointer-events-none" />
+                </>
+              )}
 
               {cameraState === 'loading' && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/85 text-center p-2">
                   <div className="w-5 h-5 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin mb-1" />
-                  <p className="text-[10px] text-cyan-400 font-cyber">INITIALIZING AI...</p>
+                  <p className="text-[10px] text-cyan-400 font-cyber">
+                    {isNativeMode ? 'CONNECTING TO GPU...' : 'INITIALIZING AI...'}
+                  </p>
                 </div>
               )}
 

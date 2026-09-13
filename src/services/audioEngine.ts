@@ -194,6 +194,32 @@ export class AudioEngine {
     osc.stop(now + 0.16);
   }
 
+  public playWallCollision() {
+    if (!this.ctx || !this.sfxGain) return;
+    const now = this.ctx.currentTime;
+
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(90, now);
+    osc.frequency.linearRampToValueAtTime(45, now + 0.35);
+
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(650, now);
+
+    gain.gain.setValueAtTime(0.7, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.sfxGain);
+
+    osc.start(now);
+    osc.stop(now + 0.36);
+  }
+
   public playWhoosh(speed: number) {
     if (!this.ctx || !this.sfxGain || speed < 1.2) return;
     const now = this.ctx.currentTime;
@@ -330,6 +356,18 @@ export class AudioEngine {
 
     // Track sound presets
     switch (trackId) {
+      case 'shape-of-you':
+        this.synthShapeOfYou(step, time, isQuarter, isOffbeat, is16th);
+        break;
+      case 'faded':
+        this.synthFaded(step, time, isQuarter, isOffbeat, is16th);
+        break;
+      case 'believer':
+        this.synthBeliever(step, time, isQuarter, isOffbeat, is16th);
+        break;
+      case 'blinding-lights':
+        this.synthBlindingLights(step, time, isQuarter, isOffbeat, is16th);
+        break;
       case 'neon-overdrive':
         this.synthNeonOverdrive(step, time, isQuarter, isOffbeat, is16th);
         break;
@@ -343,8 +381,105 @@ export class AudioEngine {
         this.synthQuantumChaos(step, time, isQuarter, isOffbeat, is16th);
         break;
       default:
-        this.synthNeonOverdrive(step, time, isQuarter, isOffbeat, is16th);
+        this.synthShapeOfYou(step, time, isQuarter, isOffbeat, is16th);
         break;
+    }
+  }
+
+  // Shape of You (Ed Sheeran): 96 BPM Tropical Pluck Marimba & Bounce Beat
+  private synthShapeOfYou(step: number, time: number, isQuarter: boolean, isOffbeat: boolean, _is16th: boolean) {
+    if (isQuarter) {
+      this.triggerKick(time, 105, 42, 0.18, 0.85);
+    }
+    if (step % 8 === 4) {
+      this.triggerSnare(time, 210, 0.15, 0.65);
+    }
+    if (isOffbeat || step % 4 === 1) {
+      this.triggerHiHat(time, 0.04, 0.25);
+    }
+
+    const marimbaNotes = [277.18, 329.63, 369.99, 415.30, 277.18, 329.63, 415.30, 369.99];
+    if (step % 2 === 0) {
+      const note = marimbaNotes[(step / 2) % marimbaNotes.length];
+      this.triggerPluckLead(time, note, 0.08, 0.35);
+    }
+
+    if (step % 16 === 0 || step % 16 === 6) {
+      this.triggerSynthBass(time, 138.59, 0.22, 'triangle', 450);
+    }
+  }
+
+  // Faded (Alan Walker): 90 BPM Atmospheric F# Minor Electro Ballad
+  private synthFaded(step: number, time: number, isQuarter: boolean, isOffbeat: boolean, _is16th: boolean) {
+    if (isQuarter) {
+      this.triggerKick(time, 95, 38, 0.22, 0.8);
+    }
+    if (step % 8 === 4) {
+      this.triggerSnare(time, 185, 0.22, 0.6);
+    }
+    if (isOffbeat) {
+      this.triggerHiHat(time, 0.06, 0.22);
+    }
+
+    const pianoMelody = [369.99, 415.30, 440.00, 554.37, 493.88, 440.00, 415.30, 369.99];
+    if (step % 4 === 0) {
+      const note = pianoMelody[(step / 4) % pianoMelody.length];
+      this.triggerPluckLead(time, note, 0.25, 0.3);
+    }
+
+    const bassRoots = [92.50, 73.42, 110.00, 98.00];
+    if (step % 16 === 0) {
+      const root = bassRoots[Math.floor(step / 16) % 4];
+      this.triggerSynthBass(time, root, 0.45, 'sine', 350);
+    }
+  }
+
+  // Believer (Imagine Dragons): 125 BPM Heavy Rock / Synth Anthem
+  private synthBeliever(step: number, time: number, isQuarter: boolean, _isOffbeat: boolean, _is16th: boolean) {
+    if (isQuarter) {
+      this.triggerKick(time, 140, 48, 0.16, 0.95);
+    }
+    if (step % 4 === 2) {
+      this.triggerSnare(time, 240, 0.16, 0.75);
+    }
+    if (step % 2 === 1) {
+      this.triggerHiHat(time, 0.03, 0.3);
+    }
+
+    const chordNotes = [233.08, 277.18, 349.23, 233.08];
+    if (step % 4 === 0 || step % 4 === 3) {
+      const chord = chordNotes[(step % 4)];
+      this.triggerLaserStab(time, chord, 0.14, 0.35);
+    }
+
+    if (step % 8 === 0) {
+      this.triggerSynthBass(time, 116.54, 0.3, 'sawtooth', 850);
+    }
+  }
+
+  // Blinding Lights (The Weeknd): 171 BPM Fast 80s Synthwave
+  private synthBlindingLights(step: number, time: number, isQuarter: boolean, isOffbeat: boolean, is16th: boolean) {
+    if (isQuarter) {
+      this.triggerKick(time, 150, 52, 0.12, 0.9);
+    }
+    if (step % 8 === 4) {
+      this.triggerSnare(time, 270, 0.14, 0.7);
+    }
+    if (isOffbeat || step % 2 === 1) {
+      this.triggerHiHat(time, 0.03, 0.28);
+    }
+
+    const synthRiff = [698.46, 659.25, 587.33, 523.25, 698.46, 783.99, 659.25, 587.33];
+    if (is16th) {
+      const note = synthRiff[(step / 2) % synthRiff.length];
+      this.triggerPluckLead(time, note, 0.08, 0.28);
+    }
+
+    const bassRoots = [87.31, 77.78, 69.30, 65.41];
+    if (is16th) {
+      const root = bassRoots[Math.floor(step / 16) % 4];
+      const octave = step % 4 === 2 ? root * 2 : root;
+      this.triggerSynthBass(time, octave, 0.1, 'sawtooth', 950);
     }
   }
 

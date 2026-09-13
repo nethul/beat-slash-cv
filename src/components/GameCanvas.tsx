@@ -78,13 +78,22 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     prevY: 0,
   });
 
-  // Visual effects state
+  // Visual effects state (pre-allocated pools to reduce GC pressure)
   const debrisRef = useRef<SliceDebris[]>([]);
   const particlesRef = useRef<SparkParticle[]>([]);
   const floatersRef = useRef<ScoreFloater[]>([]);
   const screenShakeRef = useRef<number>(0);
   const animationFrameId = useRef<number | null>(null);
   const lastFrameTime = useRef<number>(performance.now());
+
+  // Performance: particle density caps based on settings
+  const maxParticles = gameSettings.particleDensity === 'high' ? 200 : gameSettings.particleDensity === 'medium' ? 120 : 60;
+  const maxDebris = gameSettings.particleDensity === 'high' ? 40 : gameSettings.particleDensity === 'medium' ? 24 : 12;
+  const maxFloaters = 15;
+
+  // Performance: cached gradient key to avoid recreating gradients every frame
+  const gradientCacheRef = useRef<Map<string, CanvasGradient>>(new Map());
+  const lastCanvasSizeRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
 
   // Mouse tracking handler
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -132,14 +141,22 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
+    // willReadFrequently: false tells the browser to optimize for write-heavy usage
+    const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: false });
     if (!ctx) return;
 
-    // Handle canvas resize
+    // Handle canvas resize (invalidate gradient cache on resize)
     const resizeCanvas = () => {
       if (!canvas) return;
-      canvas.width = canvas.parentElement?.clientWidth || window.innerWidth;
-      canvas.height = canvas.parentElement?.clientHeight || window.innerHeight;
+      const newW = canvas.parentElement?.clientWidth || window.innerWidth;
+      const newH = canvas.parentElement?.clientHeight || window.innerHeight;
+      if (canvas.width !== newW || canvas.height !== newH) {
+        canvas.width = newW;
+        canvas.height = newH;
+        // Invalidate gradient cache on size change
+        gradientCacheRef.current.clear();
+        lastCanvasSizeRef.current = { w: newW, h: newH };
+      }
     };
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
@@ -168,12 +185,14 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
       // 2. Clear Screen & Apply Screen Shake
       ctx.save();
-      if (screenShakeRef.current > 0) {
+      if (screenShakeRef.current > 0.01) {
         const shake = screenShakeRef.current;
         const sx = (Math.random() - 0.5) * shake * 12;
         const sy = (Math.random() - 0.5) * shake * 12;
         ctx.translate(sx, sy);
-        screenShakeRef.current = Math.max(0, screenShakeRef.current - dt * 4);
+        screenShakeRef.current *= (1 - dt * 4); // Exponential decay (smoother)
+      } else {
+        screenShakeRef.current = 0;
       }
 
       ctx.fillStyle = '#030712'; // Deep slate-950
@@ -240,8 +259,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       saber.prevTip = { ...saber.tip };
       saber.prevBase = { ...saber.base };
 
-      saber.base = { x: handData.indexBase.x, y: handData.indexBase.y };
-      saber.tip = { x: handData.indexTip.x, y: handData.indexTip.y };
+      saber.base = { x: handData.indexBase.x, y: handData.indexBase.y, z: handData.indexBase.z || 0 };
+      saber.tip = { x: handData.indexTip.x, y: handData.indexTip.y, z: handData.indexTip.z || 0 };
 
       const dx = saber.tip.x - saber.prevTip.x;
       const dy = saber.tip.y - saber.prevTip.y;
@@ -300,10 +319,15 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     const midEnergy = (freqData[6] || 0) / 255;
 
     // Horizon Glow
-    const horizGlow = ctx.createRadialGradient(centerX, centerY, 10, centerX, centerY, width * 0.7);
-    horizGlow.addColorStop(0, `rgba(168, 85, 247, ${0.25 + bassEnergy * 0.3})`);
-    horizGlow.addColorStop(0.5, `rgba(6, 182, 212, ${0.1 + midEnergy * 0.15})`);
-    horizGlow.addColorStop(1, 'rgba(3, 7, 18, 0)');
+    // Performance: use cached gradient when canvas size hasn't changed
+    let horizGlow = gradientCacheRef.current.get('horizGlow');
+    if (!horizGlow) {
+      horizGlow = ctx.createRadialGradient(centerX, centerY, 10, centerX, centerY, width * 0.7);
+      horizGlow.addColorStop(0, `rgba(168, 85, 247, 0.40)`);
+      horizGlow.addColorStop(0.5, `rgba(6, 182, 212, 0.18)`);
+      horizGlow.addColorStop(1, 'rgba(3, 7, 18, 0)');
+      gradientCacheRef.current.set('horizGlow', horizGlow);
+    }
     ctx.fillStyle = horizGlow;
     ctx.fillRect(0, 0, width, height);
 
@@ -316,109 +340,94 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     ctx.fillStyle = sunGrad;
     ctx.fill();
 
-    // Perspective Runway Floor (Trapezoid from horizon to lower screen)
-    const runwayTopWidth = 140;
-    const runwayBottomWidth = width * 0.88;
-    const runwayBottomY = height * 0.84;
+    // Eye / Chest Level 3D Frontal Perspective (Beat Saber Style)
+    const horizonY = centerY - 15;
+    const floorBottomY = height * 0.90;
 
-    // Grid Floor
+    // Helper: 3D perspective X position for 4 wide parallel lanes
+    const getLaneXAtZ = (lane: number, zProgress: number) => {
+      let targetX = centerX;
+      switch (lane) {
+        case 0: targetX = centerX - width * 0.36; break; // Outer Left (Red)
+        case 1: targetX = centerX - width * 0.13; break; // Inner Left (Red)
+        case 2: targetX = centerX + width * 0.13; break; // Inner Right (Blue)
+        case 3: targetX = centerX + width * 0.36; break; // Outer Right (Blue)
+        default: targetX = centerX;
+      }
+      // Fanning 3D perspective: horizon converges slightly at center (0.2), expands to full width at player (1.0)
+      return centerX + (targetX - centerX) * (0.2 + zProgress * 0.8);
+    };
+
+    // 1. Draw 3D Ground Floor Runway
     ctx.beginPath();
-    ctx.moveTo(centerX - runwayTopWidth / 2, centerY);
-    ctx.lineTo(centerX + runwayTopWidth / 2, centerY);
-    ctx.lineTo(centerX + runwayBottomWidth / 2, runwayBottomY);
-    ctx.lineTo(centerX - runwayBottomWidth / 2, runwayBottomY);
+    ctx.moveTo(centerX - 40, horizonY);
+    ctx.lineTo(centerX + 40, horizonY);
+    ctx.lineTo(centerX + width * 0.48, floorBottomY);
+    ctx.lineTo(centerX - width * 0.48, floorBottomY);
     ctx.closePath();
 
-    const floorGrad = ctx.createLinearGradient(0, centerY, 0, runwayBottomY);
-    floorGrad.addColorStop(0, 'rgba(15, 23, 42, 0.3)');
-    floorGrad.addColorStop(1, 'rgba(30, 41, 59, 0.75)');
+    const floorGrad = ctx.createLinearGradient(0, horizonY, 0, floorBottomY);
+    floorGrad.addColorStop(0, 'rgba(15, 23, 42, 0.2)');
+    floorGrad.addColorStop(1, 'rgba(15, 23, 42, 0.7)');
     ctx.fillStyle = floorGrad;
     ctx.fill();
 
-    // Outer Runway Laser Borders
-    ctx.lineWidth = 3 + bassEnergy * 3;
-    ctx.strokeStyle = `rgba(236, 72, 153, ${0.7 + bassEnergy * 0.3})`;
-    ctx.beginPath();
-    ctx.moveTo(centerX - runwayTopWidth / 2, centerY);
-    ctx.lineTo(centerX - runwayBottomWidth / 2, runwayBottomY);
-    ctx.stroke();
-
-    ctx.strokeStyle = `rgba(34, 211, 238, ${0.7 + bassEnergy * 0.3})`;
-    ctx.beginPath();
-    ctx.moveTo(centerX + runwayTopWidth / 2, centerY);
-    ctx.lineTo(centerX + runwayBottomWidth / 2, runwayBottomY);
-    ctx.stroke();
-
-    // 4 Slicing Lane Guides
-    const numLanes = 4;
-    for (let i = 0; i <= numLanes; i++) {
-      const topX = centerX - runwayTopWidth / 2 + (runwayTopWidth / numLanes) * i;
-      const botX = centerX - runwayBottomWidth / 2 + (runwayBottomWidth / numLanes) * i;
+    // 2. Draw 4 3D Highway Lane Track Lines
+    for (let lane = 0; lane < 4; lane++) {
+      const topX = getLaneXAtZ(lane, 0);
+      const botX = getLaneXAtZ(lane, 1.1);
+      const isRed = lane < 2;
 
       ctx.beginPath();
-      ctx.moveTo(topX, centerY);
-      ctx.lineTo(botX, runwayBottomY);
-      ctx.strokeStyle = i === 2 ? 'rgba(255, 255, 255, 0.4)' : 'rgba(148, 163, 184, 0.15)';
-      ctx.lineWidth = i === 2 ? 2 : 1;
+      ctx.moveTo(topX, horizonY);
+      ctx.lineTo(botX, floorBottomY);
+      ctx.strokeStyle = isRed ? 'rgba(236, 72, 153, 0.35)' : 'rgba(34, 211, 238, 0.35)';
+      ctx.lineWidth = 2;
       ctx.stroke();
     }
 
-    // Moving horizontal grid lines (flow towards player)
+    // 3. Moving Horizontal Speed Grid Lines
     const speed = 2.5;
-    const numGridLines = 14;
+    const numGridLines = 12;
     const offset = (now * 0.001 * speed) % 1;
 
     for (let i = 0; i < numGridLines; i++) {
-      const p = (i + offset) / numGridLines;
-      const curve = Math.pow(p, 2.2); // Perspective exponential scaling
-      const lineY = centerY + (runwayBottomY - centerY) * curve;
-      const curWidth = runwayTopWidth + (runwayBottomWidth - runwayTopWidth) * curve;
+      const p = Math.pow((i + offset) / numGridLines, 2);
+      const lineY = horizonY + (floorBottomY - horizonY) * p;
 
       ctx.beginPath();
-      ctx.moveTo(centerX - curWidth / 2, lineY);
-      ctx.lineTo(centerX + curWidth / 2, lineY);
-      ctx.strokeStyle = `rgba(34, 211, 238, ${0.1 + curve * 0.4})`;
-      ctx.lineWidth = 1 + curve * 2;
+      ctx.moveTo(centerX - width * 0.45 * p, lineY);
+      ctx.lineTo(centerX + width * 0.45 * p, lineY);
+      ctx.strokeStyle = `rgba(34, 211, 238, ${0.05 + p * 0.3})`;
+      ctx.lineWidth = 1 + p * 2;
       ctx.stroke();
     }
 
-    // Player Slice Line (The target strike zone, elevated at comfortable mid-chest reach)
-    const sliceLineProgress = 0.72;
-    const sliceLineY = centerY + (runwayBottomY - centerY) * sliceLineProgress;
-    const sliceLineWidth = runwayTopWidth + (runwayBottomWidth - runwayTopWidth) * sliceLineProgress;
+    // 4. Player Frontal Strike Targets (Rendered at Chest / Eye Level in Mid-Screen!)
+    const strikeY = centerY + (gameSettings.blockHeightOffset || 0);
 
-    ctx.save();
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 3.5 + bassEnergy * 3.5;
-    ctx.shadowColor = '#22d3ee';
-    ctx.shadowBlur = 16;
-    ctx.beginPath();
-    ctx.moveTo(centerX - sliceLineWidth / 2, sliceLineY);
-    ctx.lineTo(centerX + sliceLineWidth / 2, sliceLineY);
-    ctx.stroke();
-
-    // Lane Strike Target Markers & Holographic Strike Columns
     for (let lane = 0; lane < 4; lane++) {
-      const laneOffset = (lane - 1.5) * (sliceLineWidth / 4);
-      const laneX = centerX + laneOffset;
+      const laneX = getLaneXAtZ(lane, 1.0);
       const isRed = lane < 2;
 
-      // Floor ring marker
+      // Frontal Eye-Level Target Crosshair Ring
+      ctx.save();
       ctx.beginPath();
-      ctx.arc(laneX, sliceLineY, 15, 0, Math.PI * 2);
-      ctx.strokeStyle = isRed ? 'rgba(236, 72, 153, 0.7)' : 'rgba(34, 211, 238, 0.7)';
-      ctx.lineWidth = 2;
+      ctx.arc(laneX, strikeY, 28, 0, Math.PI * 2);
+      ctx.strokeStyle = isRed ? 'rgba(236, 72, 153, 0.9)' : 'rgba(34, 211, 238, 0.9)';
+      ctx.lineWidth = 3;
+      ctx.shadowColor = isRed ? '#ec4899' : '#22d3ee';
+      ctx.shadowBlur = 12;
       ctx.stroke();
 
-      // Elevated holographic vertical beam showing strike zone
-      const colHeight = 150;
-      const colGrad = ctx.createLinearGradient(laneX, sliceLineY, laneX, sliceLineY - colHeight);
-      colGrad.addColorStop(0, isRed ? 'rgba(236, 72, 153, 0.25)' : 'rgba(34, 211, 238, 0.25)');
-      colGrad.addColorStop(1, isRed ? 'rgba(236, 72, 153, 0)' : 'rgba(34, 211, 238, 0)');
-      ctx.fillStyle = colGrad;
-      ctx.fillRect(laneX - 16, sliceLineY - colHeight, 32, colHeight);
+      // Inner target pulse ring
+      ctx.beginPath();
+      ctx.arc(laneX, strikeY, 12, 0, Math.PI * 2);
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.restore();
     }
-    ctx.restore();
 
     // Beat Audio Towers / Equalizer Pillars on sides
     const pillarCount = 8;
@@ -448,12 +457,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     const approachSpeed = 12.0; // Units per second
     const spawnZ = 16.0; // Distance where notes appear
     const sliceZ = 0.0; // Strike zone Z position
-    const hitToleranceZ = 1.6; // Strike window depth
-
-    const runwayTopWidth = 140;
-    const runwayBottomWidth = width * 0.88;
-    const runwayBottomY = height * 0.84;
-    const sliceLineProgress = 0.72;
+    const hitToleranceZ = 2.2; // Generous strike window depth
 
     // Latency adjustment from settings
     const adjustedTime = songTime + (gameSettings.latencyOffsetMs || 0) / 1000;
@@ -461,8 +465,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     notes.forEach((note) => {
       if (note.sliced) return;
 
-      // Z distance calculation: Z = 0 when time === adjustedTime
-      // Approaching when adjustedTime < note.time (Z > 0)
       const timeDiff = note.time - adjustedTime;
       const z = timeDiff * approachSpeed;
 
@@ -471,53 +473,61 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         note.missed = true;
         if (note.type !== 'bomb') {
           onNoteMissed(note);
-          spawnScoreFloater(centerX, centerY + 80, 'MISS', '#94a3b8', 22);
+          spawnScoreFloater(centerX, centerY, 'MISS', '#94a3b8', 22);
           soundManager.playMissSound();
         }
         return;
       }
 
       // If note is outside render range, skip drawing
-      if (z > spawnZ || z < -3.0) return;
+      if (z > spawnZ || z < -3.5) return;
 
-      // Compute 3D perspective projection with slice line aligned at z = 0
-      const progress = Math.max(0, 1 - z / spawnZ);
-      const curve = Math.pow(progress, 2.2) * sliceLineProgress;
+      // Eye-Level Frontal 3D Projection: Notes zoom HEAD-ON at player chest level!
+      // z = 16 (horizon) -> zProgress = 0.0, z = 0 (strike plane) -> zProgress = 1.0
+      const zProgress = Math.max(0, 1 - z / spawnZ);
+      const normScale = Math.pow(zProgress, 1.8);
 
-      const runwayWidthAtZ = runwayTopWidth + (runwayBottomWidth - runwayTopWidth) * curve;
-      const runwayYAtZ = centerY + (runwayBottomY - centerY) * curve;
+      // X coordinate: 4 parallel lanes expanding outward in 3D perspective towards player
+      let targetX = centerX;
+      switch (note.lane) {
+        case 0: targetX = centerX - width * 0.36; break;
+        case 1: targetX = centerX - width * 0.13; break;
+        case 2: targetX = centerX + width * 0.13; break;
+        case 3: targetX = centerX + width * 0.36; break;
+      }
+      const screenX = centerX + (targetX - centerX) * (0.15 + normScale * 0.85);
 
-      // Lane mapping (-1.5, -0.5, +0.5, +1.5)
-      const laneOffset = (note.lane - 1.5) * (runwayWidthAtZ / 4);
-      const screenX = centerX + laneOffset;
+      // Y coordinate: Eye / Chest Level!
+      // Layer 0 = bottom row (centerY + 45), Layer 1 = middle row (centerY - 25), Layer 2 = top row (centerY - 95)
+      const layerHeight = 70;
+      const targetY = centerY - (note.layer - 1) * layerHeight + (gameSettings.blockHeightOffset || 0);
+      const screenY = (centerY - 15) + (targetY - (centerY - 15)) * normScale;
 
-      // Layer vertical elevation (0 = bottom, 1 = mid, 2 = top)
-      // Raised significantly so notes reach player at comfortable chest & eye level (in webcam view)
-      const normCurve = Math.min(1.2, curve / sliceLineProgress); // 0 at spawn, 1 at slice line
-      const layerHeight = 70 * (0.35 + normCurve * 0.65);
-      const baseElevation = 50 + 85 * normCurve;
-      const userHeightOffset = (gameSettings.blockHeightOffset || 0);
-      const screenY = runwayYAtZ - baseElevation - note.layer * layerHeight + userHeightOffset;
-
-      // Size scales as note gets closer
-      const baseSize = 42;
-      const size = baseSize * (0.28 + normCurve * 1.5);
+      // Size scales dramatically as block zooms head-on out of the screen towards the player!
+      const baseSize = 54;
+      const size = baseSize * (0.18 + normScale * 1.22);
 
       note.currentZ = z;
       note.screenX = screenX;
       note.screenY = screenY;
       note.screenSize = size;
 
-      // Check collisions if note is inside the hit window
-      if (Math.abs(z - sliceZ) <= hitToleranceZ && !note.sliced && !note.missed) {
-        checkSaberCutCollision(note, screenX, screenY, size);
-      }
-
-      // Draw the block or bomb
-      if (note.type === 'bomb') {
+      // Render and check collisions based on NoteType
+      if (note.type === 'obstacle') {
+        renderObstacleWall(ctx, note, zProgress, centerX, centerY, width, height);
+        if (Math.abs(z - sliceZ) <= 1.8 && !note.sliced && !note.missed) {
+          checkObstacleWallDodge(note, centerX, centerY, width);
+        }
+      } else if (note.type === 'bomb') {
         renderBombBlock(ctx, screenX, screenY, size);
+        if (Math.abs(z - sliceZ) <= hitToleranceZ && !note.sliced && !note.missed) {
+          checkSaberCutCollision(note, screenX, screenY, size);
+        }
       } else {
         renderDirectionalBlock(ctx, note, screenX, screenY, size);
+        if (Math.abs(z - sliceZ) <= hitToleranceZ && !note.sliced && !note.missed) {
+          checkSaberCutCollision(note, screenX, screenY, size);
+        }
       }
     });
   };
@@ -537,9 +547,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     ctx.save();
     ctx.translate(x, y);
 
-    // Neon Glow & Drop Shadow
+    // Neon Glow & Drop Shadow (reduced blur for performance)
     ctx.shadowColor = glowColor;
-    ctx.shadowBlur = Math.min(size * 0.5, 25);
+    ctx.shadowBlur = Math.min(size * 0.35, 16);
 
     // Cube Outer Bevel
     const half = size / 2;
@@ -574,70 +584,25 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
   const renderCutDirectionIndicator = (
     ctx: CanvasRenderingContext2D,
-    direction: CutDirection,
+    _direction: CutDirection,
     size: number
   ) => {
     ctx.save();
     ctx.fillStyle = '#ffffff';
     ctx.strokeStyle = '#ffffff';
     ctx.lineWidth = Math.max(2, size * 0.08);
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
 
-    if (direction === 'any') {
-      // White glowing center dot / bullseye
-      ctx.beginPath();
-      ctx.arc(0, 0, size * 0.18, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(0, 0, size * 0.28, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.restore();
-      return;
-    }
-
-    // Determine arrow rotation
-    let angle = 0;
-    switch (direction) {
-      case 'up':
-        angle = -Math.PI / 2;
-        break;
-      case 'down':
-        angle = Math.PI / 2;
-        break;
-      case 'left':
-        angle = Math.PI;
-        break;
-      case 'right':
-        angle = 0;
-        break;
-      case 'up-left':
-        angle = -Math.PI * 0.75;
-        break;
-      case 'up-right':
-        angle = -Math.PI * 0.25;
-        break;
-      case 'down-left':
-        angle = Math.PI * 0.75;
-        break;
-      case 'down-right':
-        angle = Math.PI * 0.25;
-        break;
-    }
-
-    ctx.rotate(angle);
-
-    // Draw bold neon triangle arrow
-    const arrowLen = size * 0.32;
-    const arrowW = size * 0.24;
+    // Glowing futuristic crystal core (any-direction cut)
+    ctx.shadowColor = '#ffffff';
+    ctx.shadowBlur = Math.max(4, size * 0.1);
 
     ctx.beginPath();
-    ctx.moveTo(arrowLen, 0);
-    ctx.lineTo(-arrowLen * 0.6, -arrowW);
-    ctx.lineTo(-arrowLen * 0.2, 0);
-    ctx.lineTo(-arrowLen * 0.6, arrowW);
-    ctx.closePath();
+    ctx.arc(0, 0, size * 0.16, 0, Math.PI * 2);
     ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(0, 0, size * 0.30, 0, Math.PI * 2);
+    ctx.stroke();
 
     ctx.restore();
   };
@@ -697,6 +662,140 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     ctx.restore();
   };
 
+  const renderObstacleWall = (
+    ctx: CanvasRenderingContext2D,
+    note: Note,
+    zProgress: number,
+    centerX: number,
+    centerY: number,
+    width: number,
+    _height: number
+  ) => {
+    const normScale = Math.pow(zProgress, 1.8);
+    const obstacleLanes = note.obstacleWidth || 2;
+    const startLane = note.lane;
+    const endLane = startLane + obstacleLanes - 1;
+
+    const getLaneXAtZ = (lane: number, p: number) => {
+      let targetX = centerX;
+      switch (lane) {
+        case 0: targetX = centerX - width * 0.36; break;
+        case 1: targetX = centerX - width * 0.13; break;
+        case 2: targetX = centerX + width * 0.13; break;
+        case 3: targetX = centerX + width * 0.36; break;
+        default: targetX = centerX;
+      }
+      return centerX + (targetX - centerX) * (0.15 + p * 0.85);
+    };
+
+    const leftX = getLaneXAtZ(startLane, normScale);
+    const rightX = getLaneXAtZ(endLane, normScale);
+    const wallCenterX = (leftX + rightX) / 2;
+    const wallWidth = Math.max(90, Math.abs(rightX - leftX) + 60 * normScale);
+    const wallHeight = 220 * (0.25 + normScale * 0.9);
+    const wallY = centerY + (gameSettings.blockHeightOffset || 0);
+
+    ctx.save();
+    ctx.translate(wallCenterX, wallY);
+
+    // Semi-transparent glowing glass panel
+    const wallGrad = ctx.createLinearGradient(0, -wallHeight / 2, 0, wallHeight / 2);
+    wallGrad.addColorStop(0, 'rgba(244, 63, 94, 0.45)');
+    wallGrad.addColorStop(0.5, 'rgba(225, 29, 72, 0.7)');
+    wallGrad.addColorStop(1, 'rgba(159, 18, 57, 0.55)');
+
+    ctx.fillStyle = wallGrad;
+    ctx.shadowColor = '#f43f5e';
+    ctx.shadowBlur = Math.min(30, 10 + normScale * 20);
+
+    // Rounded Holographic Barrier Panel
+    const halfW = wallWidth / 2;
+    const halfH = wallHeight / 2;
+    ctx.beginPath();
+    ctx.roundRect(-halfW, -halfH, wallWidth, wallHeight, 14);
+    ctx.fill();
+
+    // Bold Neon Hazard Border
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = Math.max(3, 2 + normScale * 4);
+    ctx.stroke();
+
+    // Animated Hazard Stripes
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
+    ctx.lineWidth = Math.max(2, normScale * 3);
+    const stripeCount = 6;
+    for (let s = -stripeCount; s <= stripeCount; s++) {
+      const sx = s * (wallWidth / stripeCount);
+      ctx.beginPath();
+      ctx.moveTo(sx, -halfH);
+      ctx.lineTo(sx + 30, halfH);
+      ctx.stroke();
+    }
+
+    // Glowing Warning Text: DODGE ⚠️
+    if (normScale > 0.35) {
+      ctx.fillStyle = '#ffffff';
+      ctx.font = `bold ${Math.round(18 * normScale)}px Orbitron, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.shadowColor = '#000000';
+      ctx.shadowBlur = 8;
+      ctx.fillText('⚠️ DODGE ⚠️', 0, 0);
+    }
+
+    ctx.restore();
+  };
+
+  const checkObstacleWallDodge = (
+    note: Note,
+    centerX: number,
+    centerY: number,
+    width: number
+  ) => {
+    const obstacleLanes = note.obstacleWidth || 2;
+    const startLane = note.lane;
+    const endLane = startLane + obstacleLanes - 1;
+
+    const getLaneXAtZ = (lane: number, p: number) => {
+      let targetX = centerX;
+      switch (lane) {
+        case 0: targetX = centerX - width * 0.36; break;
+        case 1: targetX = centerX - width * 0.13; break;
+        case 2: targetX = centerX + width * 0.13; break;
+        case 3: targetX = centerX + width * 0.36; break;
+        default: targetX = centerX;
+      }
+      return centerX + (targetX - centerX) * (0.15 + p * 0.85);
+    };
+
+    const leftX = getLaneXAtZ(startLane, 1.0);
+    const rightX = getLaneXAtZ(endLane, 1.0);
+    const minWallX = Math.min(leftX, rightX) - 50;
+    const maxWallX = Math.max(leftX, rightX) + 50;
+
+    const leftSaber = leftSaberRef.current;
+    const rightSaber = rightSaberRef.current;
+
+    // Check if player's left hand or right hand is inside the obstacle wall's X range
+    const leftHit = leftSaber.active && leftSaber.tip.x >= minWallX && leftSaber.tip.x <= maxWallX;
+    const rightHit = rightSaber.active && rightSaber.tip.x >= minWallX && rightSaber.tip.x <= maxWallX;
+
+    if (leftHit || rightHit) {
+      // Wall Collision Hit!
+      note.missed = true;
+      onNoteMissed(note);
+      soundManager.playWallCollision();
+      screenShakeRef.current = 1.5;
+      spawnScoreFloater(centerX, centerY - 40, 'WALL HIT! -50', '#ef4444', 30);
+    } else {
+      // Successful Dodge!
+      note.sliced = true;
+      soundManager.playSliceSound('blue', 100, 1.2);
+      spawnScoreFloater(centerX, centerY - 40, 'DODGE! +50', '#38bdf8', 28);
+      onNoteSliced(note, 100, true, true);
+    }
+  };
+
   const checkSaberCutCollision = (note: Note, noteX: number, noteY: number, noteSize: number) => {
     const leftSaber = leftSaberRef.current;
     const rightSaber = rightSaberRef.current;
@@ -705,12 +804,22 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     const testSaber = (saber: SaberState) => {
       if (!saber.active) return false;
 
-      // 1. Check distance from Saber segment to Note center
-      const dist = distToSegment({ x: noteX, y: noteY }, saber.base, saber.tip);
-      if (dist > noteHalf * 1.3) return false;
+      // 1. Current blade segment distance to note center
+      const distCurrent = distToSegment({ x: noteX, y: noteY }, saber.base, saber.tip);
 
-      // 2. Minimum swing speed check to register a cut (prevents resting saber on block)
-      const minSpeed = gameSettings.controlMode === 'camera' ? 6 : 8;
+      // 2. Previous frame blade segment distance (covers fast motion between frames)
+      const distPrev = distToSegment({ x: noteX, y: noteY }, saber.prevBase, saber.prevTip);
+
+      // 3. Tip swept path segment
+      const distTipSweep = distToSegment({ x: noteX, y: noteY }, saber.prevTip, saber.tip);
+
+      const minDist = Math.min(distCurrent, distPrev, distTipSweep);
+
+      // Generous hit box (1.55x half width) to ensure effortless cuts
+      if (minDist > noteHalf * 1.55) return false;
+
+      // Lowered speed requirement so quick slashes cut instantly
+      const minSpeed = gameSettings.controlMode === 'camera' ? 2.0 : 4.0;
       if (saber.speed < minSpeed) return false;
 
       return true;
@@ -722,6 +831,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     if (!leftHit && !rightHit) return;
 
     const activeSaber = rightHit && note.color === 'blue' ? rightSaber : leftHit && note.color === 'red' ? leftSaber : leftHit ? leftSaber : rightSaber;
+
+    // 3D Spatial Forward Reach Detection: Reaching forward into 3D runway (z < -0.1) to cut early
+    const is3DReach = (activeSaber.tip.z ?? 0) < -0.12 || (activeSaber.base.z ?? 0) < -0.12;
 
     // Trigger Bomb Explosion
     if (note.type === 'bomb') {
@@ -735,19 +847,18 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       return;
     }
 
-    // Calculate Slice Velocity & Direction match
+    // Free-Direction Cutting: Any slice angle is 100% valid!
     const cutAngle = Math.atan2(activeSaber.velocity.y, activeSaber.velocity.x);
     const colorMatched =
       (note.color === 'red' && activeSaber.hand === 'left') ||
       (note.color === 'blue' && activeSaber.hand === 'right');
 
-    const directionMatched = checkDirectionMatch(cutAngle, note.direction);
+    const directionMatched = true;
 
-    // Calculate Accuracy (0 - 100)
+    // Calculate Accuracy (0 - 100) based on color match and swing speed
     let accuracy = 100;
-    if (!directionMatched) accuracy -= 35;
     if (!colorMatched) accuracy -= 40;
-    accuracy = Math.max(20, Math.min(100, accuracy + Math.min(15, activeSaber.speed)));
+    accuracy = Math.max(40, Math.min(100, accuracy + Math.min(15, activeSaber.speed)));
 
     note.sliced = true;
     note.sliceAccuracy = accuracy;
@@ -765,17 +876,15 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     spawnSparks(noteX, noteY, '#ffffff', 12, 12);
 
     // Feedback Floater
-    if (accuracy >= 90 && directionMatched && colorMatched) {
-      spawnScoreFloater(noteX, noteY - 20, '+115 PERFECT', sparkColor, 26);
-    } else if (directionMatched && colorMatched) {
-      spawnScoreFloater(noteX, noteY - 20, '+100 GOOD', sparkColor, 22);
-    } else if (!directionMatched && colorMatched) {
-      spawnScoreFloater(noteX, noteY - 20, '+40 WRONG DIR', '#f59e0b', 20);
+    if (is3DReach && colorMatched) {
+      spawnScoreFloater(noteX, noteY - 25, '3D REACH CUT! +150', '#38bdf8', 26);
+    } else if (colorMatched) {
+      spawnScoreFloater(noteX, noteY - 20, '+115 PERFECT SLICE', sparkColor, 26);
     } else {
       spawnScoreFloater(noteX, noteY - 20, '+20 WRONG SABER', '#ef4444', 20);
     }
 
-    onNoteSliced(note, accuracy, directionMatched, colorMatched);
+    onNoteSliced(note, accuracy, true, colorMatched);
   };
 
   const checkDirectionMatch = (cutAngle: number, targetDir: CutDirection): boolean => {
@@ -918,7 +1027,12 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     count: number,
     speedMax: number
   ) => {
-    for (let i = 0; i < count; i++) {
+    // Performance: cap total particle count to prevent GC spikes
+    const available = maxParticles - particlesRef.current.length;
+    const actualCount = Math.min(count, available);
+    if (actualCount <= 0) return;
+
+    for (let i = 0; i < actualCount; i++) {
       const a = Math.random() * Math.PI * 2;
       const s = (Math.random() * 0.7 + 0.3) * speedMax * 25;
       particlesRef.current.push({
@@ -948,8 +1062,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       ctx.save();
       ctx.globalAlpha = p.alpha;
       ctx.fillStyle = p.color;
-      ctx.shadowColor = p.color;
-      ctx.shadowBlur = 6;
+      // Performance: skip per-particle shadow for huge speedup
       ctx.beginPath();
       ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
       ctx.fill();
@@ -1015,7 +1128,22 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     const mainColor = isRed ? '#ef4444' : '#06b6d4';
     const glowColor = isRed ? 'rgba(239, 68, 68, 0.85)' : 'rgba(6, 182, 212, 0.85)';
 
-    // 1. Render Motion Ribbon Trail
+    // 3D Depth perspective scaling: reaching forward (z < 0) scales saber up, pulling back scales down
+    const tipZ = saber.tip.z || 0;
+    const depthScale = Math.max(0.7, Math.min(1.4, 1.0 - tipZ * 0.8));
+
+    // 1. Render 3D Runway Floor Shadow
+    const floorY = canvasRef.current ? canvasRef.current.height * 0.74 : 600;
+    if (saber.base.y < floorY) {
+      ctx.save();
+      ctx.fillStyle = isRed ? 'rgba(239, 68, 68, 0.15)' : 'rgba(6, 182, 212, 0.15)';
+      ctx.beginPath();
+      ctx.ellipse(saber.tip.x, floorY + 15, 18 * depthScale, 6 * depthScale, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // 2. Render Motion Ribbon Trail
     if (saber.trail.length > 2) {
       ctx.save();
       for (let i = 1; i < saber.trail.length; i++) {
@@ -1034,7 +1162,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           ? `rgba(239, 68, 68, ${progress * 0.45})`
           : `rgba(6, 182, 212, ${progress * 0.45})`;
         ctx.shadowColor = mainColor;
-        ctx.shadowBlur = progress * 15;
+        ctx.shadowBlur = progress * 15 * depthScale;
         ctx.fill();
       }
       ctx.restore();
@@ -1042,44 +1170,44 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
     ctx.save();
 
-    // 2. Saber Outer Neon Halo
+    // 3. Saber Outer Neon Halo with 3D Depth Width
     ctx.strokeStyle = glowColor;
-    ctx.lineWidth = 22;
+    ctx.lineWidth = 22 * depthScale;
     ctx.lineCap = 'round';
     ctx.shadowColor = mainColor;
-    ctx.shadowBlur = 30;
+    ctx.shadowBlur = 18 * depthScale;
     ctx.beginPath();
     ctx.moveTo(saber.base.x, saber.base.y);
     ctx.lineTo(saber.tip.x, saber.tip.y);
     ctx.stroke();
 
-    // 3. Saber Mid Energy Layer
+    // 4. Saber Mid Energy Layer
     ctx.strokeStyle = mainColor;
-    ctx.lineWidth = 14;
-    ctx.shadowBlur = 15;
+    ctx.lineWidth = 14 * depthScale;
+    ctx.shadowBlur = 10 * depthScale;
     ctx.beginPath();
     ctx.moveTo(saber.base.x, saber.base.y);
     ctx.lineTo(saber.tip.x, saber.tip.y);
     ctx.stroke();
 
-    // 4. White-Hot Energy Core
+    // 5. White-Hot Energy Core
     ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 6;
-    ctx.shadowBlur = 8;
+    ctx.lineWidth = 6 * depthScale;
+    ctx.shadowBlur = 0;
     ctx.beginPath();
     ctx.moveTo(saber.base.x, saber.base.y);
     ctx.lineTo(saber.tip.x, saber.tip.y);
     ctx.stroke();
 
-    // 5. Metallic Futuristic Hilt
+    // 6. Metallic Futuristic Hilt
     renderSaberHilt(ctx, saber.base, saber.angle, isRed);
 
-    // 6. Tip Plasma Flare
+    // 7. Tip Plasma Flare
     ctx.fillStyle = '#ffffff';
     ctx.shadowColor = '#ffffff';
-    ctx.shadowBlur = 15;
+    ctx.shadowBlur = 8 * depthScale;
     ctx.beginPath();
-    ctx.arc(saber.tip.x, saber.tip.y, 6, 0, Math.PI * 2);
+    ctx.arc(saber.tip.x, saber.tip.y, 6 * depthScale, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.restore();
